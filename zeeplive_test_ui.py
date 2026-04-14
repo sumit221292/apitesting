@@ -1939,7 +1939,7 @@ function editLtParams(idx){
         origFields.forEach(f=>{
             if(f.disabled)return;
             const val=existing[f.key]!==undefined?existing[f.key]:(f.value||'');
-            h+=`<div class="kv" style="margin-bottom:2px"><input class="k" value="${esc(f.key)}" readonly style="background:#111"><input value="${esc(val)}" data-orig="${esc(f.value||'')}" data-key="${esc(f.key)}"><span style="color:#555;font-size:8px">${f.value&&f.value.includes('{{')?'var':'static'}</span></div>`;
+            h+=`<div class="kv" style="margin-bottom:2px"><input class="k" value="${esc(f.key)}" readonly style="background:#111"><input value="${esc(val)}" data-orig="${esc(f.value||'')}" data-key="${esc(f.key)}"><span style="color:#555;font-size:8px">${f.value&&f.value.includes(String.fromCharCode(123,123))?'var':'static'}</span></div>`;
         });
     }
     h+=`</div>
