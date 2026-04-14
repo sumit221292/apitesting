@@ -307,18 +307,17 @@ def execute_single(ep_data, extra_body=None, timeout=30):
     url = rv(ep_data['url'])
     needs_auth = ep_data.get('needs_auth', True)
 
-    # Headers
+    # Headers - skip hardcoded Authorization, always use fresh token
     headers = {}
     for h in ep_data.get('headers', []):
         if h.get('disabled'): continue
-        k, v = h['key'], rv(h.get('value', ''))
-        if k == 'Authorization' and needs_auth:
-            tok = STATE['variables'].get('auth_token', '')
-            if tok: v = f'Bearer {tok}'
-        headers[k] = v
-    if needs_auth and 'Authorization' not in headers:
-        tok = STATE['variables'].get('auth_token', '')
-        if tok: headers['Authorization'] = f'Bearer {tok}'
+        k = h['key']
+        if k == 'Authorization': continue  # skip old hardcoded token
+        headers[k] = rv(h.get('value', ''))
+    # Inject fresh token
+    tok = STATE['variables'].get('auth_token', '')
+    if needs_auth and tok:
+        headers['Authorization'] = f'Bearer {tok}'
 
     # Body
     bcfg = ep_data.get('body', {})
@@ -2772,10 +2771,10 @@ def api_send():
     d = request.json
     meth, url = d['method'], d['url']
     hd, bd = d.get('headers', {}), d.get('body', {})
+    # Always use fresh token, never old hardcoded one
     tok = STATE['variables'].get('auth_token', '')
-    if d.get('needs_auth', True) and tok:
-        if 'Authorization' in hd: hd['Authorization'] = f'Bearer {tok}'
-        elif 'device-manual-login' not in url: hd['Authorization'] = f'Bearer {tok}'
+    if d.get('needs_auth', True) and tok and 'device-manual-login' not in url:
+        hd['Authorization'] = f'Bearer {tok}'
     if hd.get('Content-Type') == 'application/json' and isinstance(bd, dict):
         del hd['Content-Type']
     start = time.time(); uv = {}
