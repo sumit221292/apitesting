@@ -1,2 +1,2 @@
 [deploy]
-startCommand = "python zeeplive_test_ui.py"
+startCommand = "gunicorn zeeplive_test_ui:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120"

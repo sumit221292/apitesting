@@ -2828,9 +2828,11 @@ def api_load_metrics():
         'summary': L['summary'],
     })
 
+# Initialize on import (needed for gunicorn)
+load_collection()
+init_auth()
+
 if __name__ == '__main__':
-    load_collection()
-    init_auth()
     port = int(os.environ.get('PORT', 5555))
     host = '0.0.0.0' if os.environ.get('RAILWAY_ENVIRONMENT') else '127.0.0.1'
     print(f"\n  ZeepLive Test Lab | {len(STATE['all_endpoints'])} APIs | http://localhost:{port}")
