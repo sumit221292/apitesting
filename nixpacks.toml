@@ -1,0 +1,8 @@
+[start]
+cmd = "python zeeplive_test_ui.py"
+
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = ["pip install flask requests"]
