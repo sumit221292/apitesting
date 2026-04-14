@@ -90,18 +90,36 @@ def _setup_first_run():
     print("  DO NOT share .env.zeeplive file!\n")
     return users, secret
 
+def _load_env_system():
+    """Load users from system environment variables (Railway/Docker)."""
+    users = {}
+    for k, v in os.environ.items():
+        if k.startswith('USER_') and len(v) > 20:
+            users[k[5:].lower()] = v
+    return users
+
 def init_auth():
-    """Initialize auth - load from .env or run first-time setup."""
+    """Initialize auth - from system env (Railway) > .env file > first-run setup."""
     global AUTH_USERS
+    # 1. Try system environment (Railway, Docker, etc.)
+    AUTH_USERS = _load_env_system()
+    if AUTH_USERS:
+        print(f"  Auth: {len(AUTH_USERS)} users loaded from system environment")
+        return
+    # 2. Try .env file
     if os.path.exists(ENV_FILE):
         AUTH_USERS = _load_env_users()
         if AUTH_USERS:
             print(f"  Auth: {len(AUTH_USERS)} users loaded from .env.zeeplive")
             return
-    # First run
-    users, secret = _setup_first_run()
-    AUTH_USERS = users
-    app.secret_key = secret
+    # 3. First run setup (interactive)
+    if sys.stdin.isatty():
+        users, secret = _setup_first_run()
+        AUTH_USERS = users
+        app.secret_key = secret
+    else:
+        print("  ERROR: No users configured! Set USER_admin=<sha256hash> in environment.")
+        sys.exit(1)
 
 def check_auth():
     return session.get('logged_in') == True
@@ -216,8 +234,13 @@ def load_collection():
     _parse(data.get('item', []), STATE['folders'], STATE['all_endpoints'])
 
 def _load_api_creds():
-    """Load ZeepLive API credentials from .env file."""
+    """Load ZeepLive API credentials from system env or .env file."""
     defaults = {'base_url': 'https://testingphp.zeep.live/api'}
+    # System env first (Railway)
+    for k, v in os.environ.items():
+        if k.startswith('API_') and v:
+            defaults[k[4:].lower()] = v
+    # Then .env file
     if os.path.exists(ENV_FILE):
         with open(ENV_FILE, 'r') as f:
             for line in f:
@@ -225,7 +248,7 @@ def _load_api_creds():
                 if '=' not in line or line.startswith('#'): continue
                 k, v = line.split('=', 1)
                 k, v = k.strip(), v.strip()
-                if k.startswith('API_'):
+                if k.startswith('API_') and k not in os.environ:
                     defaults[k[4:].lower()] = v
     return defaults
 
@@ -2808,6 +2831,8 @@ def api_load_metrics():
 if __name__ == '__main__':
     load_collection()
     init_auth()
-    print(f"\n  ZeepLive Test Lab | {len(STATE['all_endpoints'])} APIs | http://localhost:5555")
-    print(f"  Login required | Credentials in: .env.zeeplive\n")
-    app.run(host='127.0.0.1', port=5555, debug=False)
+    port = int(os.environ.get('PORT', 5555))
+    host = '0.0.0.0' if os.environ.get('RAILWAY_ENVIRONMENT') else '127.0.0.1'
+    print(f"\n  ZeepLive Test Lab | {len(STATE['all_endpoints'])} APIs | http://localhost:{port}")
+    print(f"  Login required | Host: {host}:{port}\n")
+    app.run(host=host, port=port, debug=False)
