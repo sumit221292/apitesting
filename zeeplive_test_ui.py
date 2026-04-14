@@ -547,11 +547,16 @@ def _load_vu_worker(vu_id, config, endpoints, lock):
                 for f in bcfg.get(mode, []):
                     if not f.get('disabled'): bdata[f['key']] = rv(f.get('value', ''))
 
-        # Apply custom params from user
-        ep_params = config.get('params', {}).get(ep['name'], {})
-        if ep_params:
-            if bdata is None: bdata = {}
-            bdata.update(ep_params)
+        # Apply custom params from user (body + headers)
+        ep_custom = config.get('params', {}).get(ep['name'], {})
+        if isinstance(ep_custom, dict):
+            custom_body = ep_custom.get('body', ep_custom if 'body' not in ep_custom and 'headers' not in ep_custom else {})
+            custom_headers = ep_custom.get('headers', {})
+            if custom_body:
+                if bdata is None: bdata = {}
+                bdata.update(custom_body)
+            if custom_headers:
+                headers.update(custom_headers)
 
         start = time.time()
         entry = {'ts': time.time(), 'endpoint': ep['name'], 'status': 0,
@@ -1900,7 +1905,7 @@ function showToast(msg){
 // ═══ LOAD TEST ═══
 let ltSel={},ltPoll=null;
 
-let ltParams={}; // {endpoint_name: {field:value}} - custom params for load test
+let ltParams={}; // {endpoint_name: {body:{field:value}, headers:{k:v}}} - custom params for load test
 
 function renderLtEps(){
     if(!A.length)return;
@@ -1908,12 +1913,15 @@ function renderLtEps(){
     A.forEach((ep,i)=>{
         const k='lt-'+i;ltSel[k]=ltSel[k]||false;
         const safe=_safe2(ep);
-        const hasParams=ltParams[ep.name]&&Object.keys(ltParams[ep.name]).length;
+        const p=ltParams[ep.name]||{};
+        const bCnt=Object.keys(p.body||{}).length;
+        const hCnt=Object.keys(p.headers||{}).length;
+        const hasParams=bCnt+hCnt>0;
         h+=`<div class="lt-ep-row">
             <input type="checkbox" id="${k}" onchange="ltSel['${k}']=this.checked;ltUpdCnt()">
             <span class="bge ${ep.method}" style="font-size:9px">${ep.method}</span>
             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${safe?'#ccc':'#888'}">${ep.name}</span>
-            ${hasParams?`<span style="color:#42a5f5;font-size:8px;font-weight:700">${Object.keys(ltParams[ep.name]).length}P</span>`:''}
+            ${hasParams?`<span style="color:#42a5f5;font-size:8px;font-weight:700">${bCnt}B ${hCnt}H</span>`:''}
             ${safe?'<span style="color:#66bb6a;font-size:8px">SAFE</span>':'<span style="color:#ff8f00;font-size:8px">WRITE</span>'}
             <button class="btn-sm" style="font-size:8px;padding:1px 4px" onclick="event.stopPropagation();editLtParams(${i})" title="Edit parameters for this API">Params</button>
         </div>`;
@@ -1923,71 +1931,107 @@ function renderLtEps(){
 
 function editLtParams(idx){
     const ep=A[idx];
-    const existing=ltParams[ep.name]||{};
-    // Get original body fields
+    const saved=ltParams[ep.name]||{};
+    const savedBody=saved.body||{};
+    const savedHeaders=saved.headers||{};
+
+    // Original body fields
     const bd=ep.body||{};const mode=bd.mode||'';
     const origFields=bd[mode]||bd.formdata||bd.urlencoded||[];
+    // Original headers
+    const origHeaders=(ep.headers||[]).filter(h=>!h.disabled);
 
     let h=`<div style="padding:12px">
-        <div style="font-size:12px;font-weight:700;color:#4fc3f7;margin-bottom:8px">${esc(ep.name)}</div>
-        <div style="font-size:10px;color:#888;margin-bottom:8px">${ep.method} ${esc(ep.url)}</div>
-        <div style="font-size:11px;color:#aaa;margin-bottom:6px;font-weight:600">Body Parameters:</div>
-        <div id="ltParamFields">`;
+        <div style="font-size:13px;font-weight:700;color:#4fc3f7;margin-bottom:4px">${esc(ep.name)}</div>
+        <div style="font-size:10px;color:#888;margin-bottom:10px">${ep.method} ${esc(ep.url)}</div>
 
-    // Show original fields (editable)
+        <div style="font-size:12px;color:#66bb6a;margin-bottom:6px;font-weight:700;border-bottom:1px solid #222;padding-bottom:4px">Headers</div>
+        <div id="ltHdrFields">`;
+
+    // Show original headers (editable values)
+    origHeaders.forEach(oh=>{
+        if(oh.key==='Authorization')return; // skip - auto injected
+        const val=savedHeaders[oh.key]!==undefined?savedHeaders[oh.key]:oh.value;
+        h+=`<div class="kv" style="margin-bottom:2px"><input class="k" value="${esc(oh.key)}" readonly style="background:#111"><input value="${esc(val)}" data-key="${esc(oh.key)}"></div>`;
+    });
+    h+=`</div>
+    <div id="ltExtraHeaders"></div>
+    <button class="btn-sm" onclick="addLtRow('ltExtraHeaders','header')" style="width:100%;text-align:center;margin-top:4px">+ Add Header</button>
+
+    <div style="font-size:12px;color:#ffb74d;margin-top:12px;margin-bottom:6px;font-weight:700;border-bottom:1px solid #222;padding-bottom:4px">Body Parameters</div>
+    <div id="ltParamFields">`;
+
+    // Show original body fields (editable values)
     if(Array.isArray(origFields)){
         origFields.forEach(f=>{
             if(f.disabled)return;
-            const val=existing[f.key]!==undefined?existing[f.key]:(f.value||'');
-            h+=`<div class="kv" style="margin-bottom:2px"><input class="k" value="${esc(f.key)}" readonly style="background:#111"><input value="${esc(val)}" data-orig="${esc(f.value||'')}" data-key="${esc(f.key)}"><span style="color:#555;font-size:8px">${f.value&&f.value.includes(String.fromCharCode(123,123))?'var':'static'}</span></div>`;
+            const val=savedBody[f.key]!==undefined?savedBody[f.key]:(f.value||'');
+            h+=`<div class="kv" style="margin-bottom:2px"><input class="k" value="${esc(f.key)}" readonly style="background:#111"><input value="${esc(val)}" data-key="${esc(f.key)}"><span style="color:#666;font-size:9px">${f.value&&f.value.includes(String.fromCharCode(123,123))?'var':'static'}</span></div>`;
         });
     }
     h+=`</div>
-    <div style="font-size:11px;color:#aaa;margin-top:8px;margin-bottom:4px;font-weight:600">Add Extra Parameters:</div>
     <div id="ltExtraFields"></div>
-    <button class="btn-sm" onclick="addLtExtraField()" style="width:100%;text-align:center;margin-top:4px">+ Add Field</button>
-    <div style="display:flex;gap:6px;margin-top:10px">
-        <button onclick="saveLtParams(${idx})" style="flex:1;padding:8px;background:#1565c0;color:#fff;border:none;border-radius:4px;font-weight:700;cursor:pointer">Save Params</button>
+    <button class="btn-sm" onclick="addLtRow('ltExtraFields','body')" style="width:100%;text-align:center;margin-top:4px">+ Add Body Field</button>
+
+    <div style="display:flex;gap:6px;margin-top:12px">
+        <button onclick="saveLtParams(${idx})" style="flex:1;padding:8px;background:#1565c0;color:#fff;border:none;border-radius:4px;font-weight:700;cursor:pointer;font-size:12px">Save</button>
         <button onclick="clearLtParams(${idx})" style="padding:8px 12px;background:#333;color:#aaa;border:none;border-radius:4px;cursor:pointer">Reset</button>
     </div></div>`;
 
     document.getElementById('varsB').innerHTML=h;
-    document.querySelector('#varsMdl .modal-h h3').textContent='Edit Load Test Parameters';
+    document.querySelector('#varsMdl .modal-h h3').textContent='Edit Parameters & Headers';
     document.getElementById('varsMdl').classList.add('show');
     document.getElementById('overlay').classList.add('show');
 
-    // Add extra fields that were previously added
-    for(const[k,v] of Object.entries(existing)){
+    // Load saved extra body fields
+    for(const[k,v] of Object.entries(savedBody)){
         if(!Array.isArray(origFields)||!origFields.some(f=>f.key===k)){
-            addLtExtraField(k,v);
+            addLtRow('ltExtraFields','body',k,v);
+        }
+    }
+    // Load saved extra headers
+    for(const[k,v] of Object.entries(savedHeaders)){
+        if(!origHeaders.some(h=>h.key===k)){
+            addLtRow('ltExtraHeaders','header',k,v);
         }
     }
 }
 
-function addLtExtraField(k='',v=''){
-    document.getElementById('ltExtraFields').insertAdjacentHTML('beforeend',
-        `<div class="kv" style="margin-bottom:2px;background:#0a0f1a;border-left:2px solid #1565c0"><input class="k" value="${esc(k)}" placeholder="key" style="color:#42a5f5"><input value="${esc(v)}" placeholder="value"><button class="x" onclick="this.parentElement.remove()">&times;</button></div>`);
+function addLtRow(containerId,type,k='',v=''){
+    const color=type==='header'?'#66bb6a':'#42a5f5';
+    document.getElementById(containerId).insertAdjacentHTML('beforeend',
+        `<div class="kv" style="margin-bottom:2px;background:#0a0f1a;border-left:2px solid ${color}"><input class="k" value="${esc(k)}" placeholder="${type} key" style="color:${color}"><input value="${esc(v)}" placeholder="value"><button class="x" onclick="this.parentElement.remove()">&times;</button></div>`);
 }
 
 function saveLtParams(idx){
     const ep=A[idx];
-    const params={};
-    // Original fields - save if changed from original
+    const body={};
+    const headers={};
+
+    // Body fields
     document.querySelectorAll('#ltParamFields .kv').forEach(row=>{
         const inp=row.querySelectorAll('input');
-        const key=inp[0].value;
-        const val=inp[1].value;
-        if(key)params[key]=val;
+        if(inp[0].value)body[inp[0].value]=inp[1].value;
     });
-    // Extra fields
     document.querySelectorAll('#ltExtraFields .kv').forEach(row=>{
         const inp=row.querySelectorAll('input');
-        if(inp[0].value.trim())params[inp[0].value.trim()]=inp[1].value;
+        if(inp[0].value.trim())body[inp[0].value.trim()]=inp[1].value;
     });
-    ltParams[ep.name]=params;
+
+    // Header fields
+    document.querySelectorAll('#ltHdrFields .kv').forEach(row=>{
+        const inp=row.querySelectorAll('input');
+        if(inp[0].value)headers[inp[0].value]=inp[1].value;
+    });
+    document.querySelectorAll('#ltExtraHeaders .kv').forEach(row=>{
+        const inp=row.querySelectorAll('input');
+        if(inp[0].value.trim())headers[inp[0].value.trim()]=inp[1].value;
+    });
+
+    ltParams[ep.name]={body,headers};
     closeVars();
     renderLtEps();
-    showToast('Params saved for: '+ep.name);
+    showToast('Params & headers saved for: '+ep.name);
 }
 
 function clearLtParams(idx){
