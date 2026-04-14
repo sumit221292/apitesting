@@ -1866,9 +1866,9 @@ function renderLtEps(){
     if(!A.length)return;
     let h='';
     A.forEach((ep,i)=>{
-        if(!_safe2(ep))return;
         const k='lt-'+i;ltSel[k]=ltSel[k]||false;
-        h+=`<div class="lt-ep-row"><input type="checkbox" id="${k}" onchange="ltSel['${k}']=this.checked;ltUpdCnt()"><span class="bge ${ep.method}" style="font-size:9px">${ep.method}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ep.name}</span></div>`;
+        const safe=_safe2(ep);
+        h+=`<div class="lt-ep-row"><input type="checkbox" id="${k}" onchange="ltSel['${k}']=this.checked;ltUpdCnt()"><span class="bge ${ep.method}" style="font-size:9px">${ep.method}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${safe?'#ccc':'#888'}">${ep.name}</span>${safe?'<span style="color:#66bb6a;font-size:8px">SAFE</span>':'<span style="color:#ff8f00;font-size:8px">WRITE</span>'}</div>`;
     });
     document.getElementById('ltEpList').innerHTML=h;ltUpdCnt();
 }
@@ -2137,8 +2137,9 @@ function renderLtSummary(s){
     document.getElementById('ltSummary').innerHTML=h;
 }
 
-// Init load test endpoint list after data loads
-setTimeout(renderLtEps,1000);
+// Init load test endpoint list - retry until data loaded
+function initLtEps(){if(A.length>0)renderLtEps();else setTimeout(initLtEps,500)}
+setTimeout(initLtEps,500);
 
 // ═══ ADD API / COLLECTION / MANAGE ═══
 
