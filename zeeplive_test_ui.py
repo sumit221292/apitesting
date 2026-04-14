@@ -547,9 +547,15 @@ def _load_vu_worker(vu_id, config, endpoints, lock):
                 for f in bcfg.get(mode, []):
                     if not f.get('disabled'): bdata[f['key']] = rv(f.get('value', ''))
 
+        # Apply custom params from user
+        ep_params = config.get('params', {}).get(ep['name'], {})
+        if ep_params:
+            if bdata is None: bdata = {}
+            bdata.update(ep_params)
+
         start = time.time()
         entry = {'ts': time.time(), 'endpoint': ep['name'], 'status': 0,
-                 'time_ms': 0, 'error': None, 'vu_id': vu_id}
+                 'time_ms': 0, 'error': None, 'vu_id': vu_id, 'response_body': None}
         try:
             kw = {'headers': headers, 'verify': False, 'timeout': config.get('req_timeout', 30)}
             if bdata: kw['data'] = bdata
@@ -559,6 +565,8 @@ def _load_vu_worker(vu_id, config, endpoints, lock):
                                    timeout=config.get('req_timeout', 30))
             entry['status'] = resp.status_code
             entry['time_ms'] = int((time.time() - start) * 1000)
+            # Save first response per endpoint as sample
+            entry['response_body'] = resp.text[:1000] if resp.text else None
         except Exception as e:
             entry['time_ms'] = int((time.time() - start) * 1000)
             entry['error'] = str(e)[:100]
@@ -727,7 +735,37 @@ def _load_test_runner(config):
             'endpoints_tested': len(set(r['endpoint'] for r in all_reqs)),
             'ep_breakdown': ep_breakdown,
             'status_dist': dict(status_dist),
+            'sample_responses': [],
+            'timestamp': datetime.now().isoformat(),
         }
+
+        # Collect one sample response per endpoint
+        seen_eps = set()
+        for r in all_reqs:
+            if r['endpoint'] not in seen_eps and r.get('response_body'):
+                seen_eps.add(r['endpoint'])
+                L['summary']['sample_responses'].append({
+                    'endpoint': r['endpoint'],
+                    'status': r['status'],
+                    'time_ms': r['time_ms'],
+                    'body': r['response_body'][:2000],
+                })
+
+        # Save to history
+        STATE['load_history'] = STATE.get('load_history', [])
+        STATE['load_history'].append({
+            'timestamp': L['summary']['timestamp'],
+            'total': L['summary']['total_requests'],
+            'errors': L['summary']['total_errors'],
+            'avg_rps': L['summary']['avg_rps'],
+            'avg_rt': L['summary']['avg_rt'],
+            'p95': L['summary']['p95'],
+            'pattern': pattern,
+            'max_vus': max_vus,
+            'duration': L['summary']['duration'],
+        })
+        # Keep last 20
+        STATE['load_history'] = STATE.get('load_history', [])[-20:]
 
     pool.shutdown(wait=False)
 
@@ -1862,15 +1900,102 @@ function showToast(msg){
 // ═══ LOAD TEST ═══
 let ltSel={},ltPoll=null;
 
+let ltParams={}; // {endpoint_name: {field:value}} - custom params for load test
+
 function renderLtEps(){
     if(!A.length)return;
     let h='';
     A.forEach((ep,i)=>{
         const k='lt-'+i;ltSel[k]=ltSel[k]||false;
         const safe=_safe2(ep);
-        h+=`<div class="lt-ep-row"><input type="checkbox" id="${k}" onchange="ltSel['${k}']=this.checked;ltUpdCnt()"><span class="bge ${ep.method}" style="font-size:9px">${ep.method}</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${safe?'#ccc':'#888'}">${ep.name}</span>${safe?'<span style="color:#66bb6a;font-size:8px">SAFE</span>':'<span style="color:#ff8f00;font-size:8px">WRITE</span>'}</div>`;
+        const hasParams=ltParams[ep.name]&&Object.keys(ltParams[ep.name]).length;
+        h+=`<div class="lt-ep-row">
+            <input type="checkbox" id="${k}" onchange="ltSel['${k}']=this.checked;ltUpdCnt()">
+            <span class="bge ${ep.method}" style="font-size:9px">${ep.method}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${safe?'#ccc':'#888'}">${ep.name}</span>
+            ${hasParams?`<span style="color:#42a5f5;font-size:8px;font-weight:700">${Object.keys(ltParams[ep.name]).length}P</span>`:''}
+            ${safe?'<span style="color:#66bb6a;font-size:8px">SAFE</span>':'<span style="color:#ff8f00;font-size:8px">WRITE</span>'}
+            <button class="btn-sm" style="font-size:8px;padding:1px 4px" onclick="event.stopPropagation();editLtParams(${i})" title="Edit parameters for this API">Params</button>
+        </div>`;
     });
     document.getElementById('ltEpList').innerHTML=h;ltUpdCnt();
+}
+
+function editLtParams(idx){
+    const ep=A[idx];
+    const existing=ltParams[ep.name]||{};
+    // Get original body fields
+    const bd=ep.body||{};const mode=bd.mode||'';
+    const origFields=bd[mode]||bd.formdata||bd.urlencoded||[];
+
+    let h=`<div style="padding:12px">
+        <div style="font-size:12px;font-weight:700;color:#4fc3f7;margin-bottom:8px">${esc(ep.name)}</div>
+        <div style="font-size:10px;color:#888;margin-bottom:8px">${ep.method} ${esc(ep.url)}</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:6px;font-weight:600">Body Parameters:</div>
+        <div id="ltParamFields">`;
+
+    // Show original fields (editable)
+    if(Array.isArray(origFields)){
+        origFields.forEach(f=>{
+            if(f.disabled)return;
+            const val=existing[f.key]!==undefined?existing[f.key]:(f.value||'');
+            h+=`<div class="kv" style="margin-bottom:2px"><input class="k" value="${esc(f.key)}" readonly style="background:#111"><input value="${esc(val)}" data-orig="${esc(f.value||'')}" data-key="${esc(f.key)}"><span style="color:#555;font-size:8px">${f.value&&f.value.includes('{{')?'var':'static'}</span></div>`;
+        });
+    }
+    h+=`</div>
+    <div style="font-size:11px;color:#aaa;margin-top:8px;margin-bottom:4px;font-weight:600">Add Extra Parameters:</div>
+    <div id="ltExtraFields"></div>
+    <button class="btn-sm" onclick="addLtExtraField()" style="width:100%;text-align:center;margin-top:4px">+ Add Field</button>
+    <div style="display:flex;gap:6px;margin-top:10px">
+        <button onclick="saveLtParams(${idx})" style="flex:1;padding:8px;background:#1565c0;color:#fff;border:none;border-radius:4px;font-weight:700;cursor:pointer">Save Params</button>
+        <button onclick="clearLtParams(${idx})" style="padding:8px 12px;background:#333;color:#aaa;border:none;border-radius:4px;cursor:pointer">Reset</button>
+    </div></div>`;
+
+    document.getElementById('varsB').innerHTML=h;
+    document.querySelector('#varsMdl .modal-h h3').textContent='Edit Load Test Parameters';
+    document.getElementById('varsMdl').classList.add('show');
+    document.getElementById('overlay').classList.add('show');
+
+    // Add extra fields that were previously added
+    for(const[k,v] of Object.entries(existing)){
+        if(!Array.isArray(origFields)||!origFields.some(f=>f.key===k)){
+            addLtExtraField(k,v);
+        }
+    }
+}
+
+function addLtExtraField(k='',v=''){
+    document.getElementById('ltExtraFields').insertAdjacentHTML('beforeend',
+        `<div class="kv" style="margin-bottom:2px;background:#0a0f1a;border-left:2px solid #1565c0"><input class="k" value="${esc(k)}" placeholder="key" style="color:#42a5f5"><input value="${esc(v)}" placeholder="value"><button class="x" onclick="this.parentElement.remove()">&times;</button></div>`);
+}
+
+function saveLtParams(idx){
+    const ep=A[idx];
+    const params={};
+    // Original fields - save if changed from original
+    document.querySelectorAll('#ltParamFields .kv').forEach(row=>{
+        const inp=row.querySelectorAll('input');
+        const key=inp[0].value;
+        const val=inp[1].value;
+        if(key)params[key]=val;
+    });
+    // Extra fields
+    document.querySelectorAll('#ltExtraFields .kv').forEach(row=>{
+        const inp=row.querySelectorAll('input');
+        if(inp[0].value.trim())params[inp[0].value.trim()]=inp[1].value;
+    });
+    ltParams[ep.name]=params;
+    closeVars();
+    renderLtEps();
+    showToast('Params saved for: '+ep.name);
+}
+
+function clearLtParams(idx){
+    const ep=A[idx];
+    delete ltParams[ep.name];
+    closeVars();
+    renderLtEps();
+    showToast('Params reset for: '+ep.name);
 }
 function _safe2(ep){
     const n=ep.name.toLowerCase();
@@ -1936,6 +2061,7 @@ async function startLoad(){
         req_timeout:+document.getElementById('ltTimeout').value,
         per_vu_login:document.getElementById('ltPerVuLogin').checked,
         endpoints:eps,
+        params:ltParams,
     };
     document.getElementById('ltRunBtn').style.display='none';
     document.getElementById('ltStopBtn').style.display='';
@@ -1981,6 +2107,7 @@ async function pollLoad(){
     if(!d.running&&d.summary){
         clearInterval(ltPoll);ltPoll=null;
         document.getElementById('ltRunBtn').style.display='';document.getElementById('ltStopBtn').style.display='none';
+        lastLoadSummary=d.summary;
         renderLtSummary(d.summary);
     }
 }
@@ -2133,8 +2260,62 @@ function renderLtSummary(s){
             </div>`;
         }
     }
+    // Sample responses
+    if(s.sample_responses&&s.sample_responses.length){
+        h+=`<div style="margin-top:10px"><b style="color:#aaa;font-size:11px">Sample Responses</b>
+            <span style="color:#888;font-size:10px;margin-left:6px">- har API ka ek sample response</span></div>`;
+        s.sample_responses.forEach((sr,i)=>{
+            const cc=sr.status>=500?'#ef5350':sr.status>=400?'#ff8f00':sr.status>=200?'#66bb6a':'#888';
+            h+=`<details style="margin-top:4px;border:1px solid #222;border-radius:3px">
+                <summary style="padding:5px 8px;cursor:pointer;font-size:10px;color:#ccc;background:#111"><span style="color:${cc};font-weight:700">${sr.status}</span> ${esc(sr.endpoint)} <span style="color:#888">${sr.time_ms}ms</span></summary>
+                <pre style="padding:8px;font-size:9px;color:#aaa;max-height:150px;overflow:auto;background:#0a0a0a;margin:0">${esc(sr.body)}</pre>
+            </details>`;
+        });
+    }
+
+    // Export buttons
+    h+=`<div style="margin-top:12px;display:flex;gap:6px;padding-bottom:10px">
+        <button class="btn-sm" style="background:#1565c0;color:#fff;border-color:#1565c0" onclick="exportLoadResults('json')">Export JSON</button>
+        <button class="btn-sm" style="background:#2e7d32;color:#fff;border-color:#2e7d32" onclick="exportLoadResults('csv')">Export CSV</button>
+        <button class="btn-sm" onclick="exportLoadResults('metrics')">Export Metrics</button>
+        <button class="btn-sm" onclick="exportLoadResults('responses')">Export Responses</button>
+    </div>`;
+
     h+=`</div>`;
     document.getElementById('ltSummary').innerHTML=h;
+}
+
+let lastLoadSummary=null;
+function exportLoadResults(type){
+    if(!lastLoadSummary)return alert('No load test results to export');
+    const s=lastLoadSummary;
+    let content,filename,mime;
+
+    if(type==='json'){
+        content=JSON.stringify(s,null,2);
+        filename='load_test_'+new Date().toISOString().slice(0,10)+'.json';
+        mime='application/json';
+    }else if(type==='csv'){
+        let csv='Endpoint,Requests,Errors,Error%,Avg(ms),P50(ms),P95(ms),Max(ms)\\n';
+        (s.ep_breakdown||[]).forEach(e=>{csv+=`"${e.name}",${e.count},${e.errors},${e.err_rate},${e.avg},${e.p50},${e.p95},${e.max}\\n`});
+        csv+='\\nTotal,'+s.total_requests+','+s.total_errors+','+s.error_rate+','+s.avg_rt+','+s.p50+','+s.p95+','+s.max_rt+'\\n';
+        csv+='\\nDuration,'+s.duration+'s\\nMax VUs,'+s.max_vus+'\\nPattern,'+s.pattern+'\\nAvg RPS,'+s.avg_rps+'\\n';
+        content=csv;
+        filename='load_test_'+new Date().toISOString().slice(0,10)+'.csv';
+        mime='text/csv';
+    }else if(type==='metrics'){
+        content=JSON.stringify(chartData||[],null,2);
+        filename='load_metrics_timeline_'+new Date().toISOString().slice(0,10)+'.json';
+        mime='application/json';
+    }else if(type==='responses'){
+        content=JSON.stringify(s.sample_responses||[],null,2);
+        filename='load_responses_'+new Date().toISOString().slice(0,10)+'.json';
+        mime='application/json';
+    }
+    const blob=new Blob([content],{type:mime});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=filename;a.click();URL.revokeObjectURL(a.href);
+    showToast('Exported: '+filename);
 }
 
 // Init load test endpoint list - retry until data loaded
