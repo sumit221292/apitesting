@@ -14,7 +14,7 @@ from flask import Flask, render_template_string, request, jsonify, session, redi
 
 requests.packages.urllib3.disable_warnings()
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(32)
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour session timeout
 app.config['SESSION_COOKIE_HTTPONLY'] = True       # JS can't read session cookie
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'     # CSRF protection
