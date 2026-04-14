@@ -512,8 +512,8 @@ def _load_vu_worker(vu_id, config, endpoints, lock):
     session.verify = False
     token = STATE['variables'].get('auth_token', '')
 
-    # If each VU should login independently
-    if config.get('per_vu_login'):
+    # If no token, auto-login first
+    if not token or config.get('per_vu_login'):
         login_ep = _find_ep('Login User (Device Manual Login)')
         if login_ep:
             res = execute_single(login_ep, timeout=15)
@@ -528,13 +528,15 @@ def _load_vu_worker(vu_id, config, endpoints, lock):
         ep = random.choice(endpoints)
         url = rv(ep['url'])
 
-        # Build request
+        # Build headers - skip collection's hardcoded Authorization
         headers = {}
         for h in ep.get('headers', []):
-            if not h.get('disabled'):
+            if not h.get('disabled') and h['key'] != 'Authorization':
                 headers[h['key']] = rv(h.get('value', ''))
-        if ep.get('needs_auth') and token:
+        # Always inject fresh token for auth endpoints
+        if token:
             headers['Authorization'] = f'Bearer {token}'
+        # Fix content type for form data
         if headers.get('Content-Type') == 'application/json':
             del headers['Content-Type']
 
@@ -556,7 +558,9 @@ def _load_vu_worker(vu_id, config, endpoints, lock):
                 if bdata is None: bdata = {}
                 bdata.update(custom_body)
             if custom_headers:
-                headers.update(custom_headers)
+                for ck, cv in custom_headers.items():
+                    if ck != 'Authorization':  # never override auth from params
+                        headers[ck] = cv
 
         start = time.time()
         entry = {'ts': time.time(), 'endpoint': ep['name'], 'status': 0,
