@@ -397,6 +397,10 @@ def run_suite_bg(suite):
                'stats': {'passed': 0, 'failed': 0, 'errors': 0, 'total_time': 0},
                'suite_name': suite.get('name', 'Test')})
 
+    # Ensure token exists before running suite
+    if not STATE['variables'].get('auth_token'):
+        _do_zeeplive_login()
+
     for i, step in enumerate(suite['steps']):
         if not pr['running']: break
         pr['current'] = i + 1
@@ -504,20 +508,39 @@ def _safe(ep):
 
 # ────────────────────── Load Test Engine ──────────────────────
 
+def _do_zeeplive_login():
+    """Login to ZeepLive API and return fresh token."""
+    try:
+        resp = requests.post(
+            rv(STATE['variables'].get('base_url', 'https://testingphp.zeep.live/api')) + '/device-manual-login',
+            headers={'appid': '1', 'content-type': 'application/x-www-form-urlencoded'},
+            data={
+                'username': STATE['variables'].get('username', ''),
+                'password': STATE['variables'].get('password', ''),
+                'myhaskey': STATE['variables'].get('myhaskey', ''),
+                'device_id': STATE['variables'].get('device_id', ''),
+                'unique_device_id': STATE['variables'].get('unique_device_id', ''),
+                'country_name': STATE['variables'].get('country_name', 'India'),
+            }, verify=False, timeout=15)
+        rj = resp.json()
+        if rj.get('success') and rj.get('result', {}).get('token'):
+            token = rj['result']['token']
+            STATE['variables']['auth_token'] = token
+            return token
+    except:
+        pass
+    return STATE['variables'].get('auth_token', '')
+
 def _load_vu_worker(vu_id, config, endpoints, lock):
     """Single virtual user worker - simulates real user behavior."""
     L = STATE['load']
     session = requests.Session()
     session.verify = False
-    token = STATE['variables'].get('auth_token', '')
 
-    # If no token, auto-login first
+    # Always get a fresh token - don't rely on STATE (multi-worker issue)
+    token = config.get('_shared_token', '') or STATE['variables'].get('auth_token', '')
     if not token or config.get('per_vu_login'):
-        login_ep = _find_ep('Login User (Device Manual Login)')
-        if login_ep:
-            res = execute_single(login_ep, timeout=15)
-            if res.get('extracted_vars', {}).get('auth_token'):
-                token = res['extracted_vars']['auth_token']
+        token = _do_zeeplive_login()
 
     think_min = config.get('think_time_min', 500) / 1000
     think_max = config.get('think_time_max', 2000) / 1000
@@ -638,6 +661,12 @@ def _load_test_runner(config):
     endpoints = [_find_ep(n) for n in ep_names if _find_ep(n)]
     if not endpoints:
         L['running'] = False; return
+
+    # Get fresh token ONCE and share with all VUs
+    token = STATE['variables'].get('auth_token', '')
+    if not token:
+        token = _do_zeeplive_login()
+    config['_shared_token'] = token
 
     max_vus = config.get('max_vus', 10)
     ramp_up = config.get('ramp_up', 5)  # seconds to reach max
